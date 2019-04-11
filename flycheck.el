@@ -312,6 +312,17 @@ respectively."
   :safe #'flycheck-symbol-list-p)
 (make-variable-buffer-local 'flycheck-disabled-checkers)
 
+(defvar-local flycheck--automatically-disabled-checkers nil
+  "List of syntax checkers automatically disabled for this buffer.
+
+A checker can be automatically disabled in two cases:
+
+1. Its `:enabled' predicate returned false.
+2. It returned too many errors (see `flycheck-checker-error-threshold').
+
+To trigger a reverification from Emacs Lisp code, do not modify
+this variable: use `flycheck-reset-enabled-checker'.")
+
 (defvar-local flycheck-checker nil
   "Syntax checker to use for the current buffer.
 
@@ -1556,7 +1567,16 @@ A checker is registered if it is contained in
 
 A checker is disabled if it is contained in
 `flycheck-disabled-checkers'."
-  (memq checker flycheck-disabled-checkers))
+  (or (memq checker flycheck-disabled-checkers)
+      (flycheck-automatically-disabled-checker-p checker)))
+
+(defun flycheck-automatically-disabled-checker-p (checker)
+  "Determine whether CHECKER has been automatically disabled.
+
+A checker has been automatically disabled if it is contained in
+`flycheck-automatically-disabled-checkers'."
+  (memq checker flycheck--automatically-disabled-checkers))
+
 
 
 ;;; Generic syntax checkers
@@ -1741,8 +1761,8 @@ are mandatory.
      If FUNCTION returns a non-nil value the checker is put in a
      whitelist in `flycheck-enabled-checkers' to prevent further
      invocations of `:enabled'.  Otherwise it is disabled via
-     `flycheck-disabled-checkers' to prevent any further use of
-     it.
+     `flycheck-automatically-disabled-checkers' to prevent any
+     further use of it.
 
      If this checker has a `:working-directory' FUNCTION is
      called with `default-directory' bound to the checker's
@@ -1945,8 +1965,25 @@ nil otherwise."
                                 (funcall enabled)))))
     (if shall-enable
         (cl-pushnew checker flycheck-enabled-checkers)
-      (cl-pushnew checker flycheck-disabled-checkers))
+      (cl-pushnew checker flycheck--automatically-disabled-checkers))
     shall-enable))
+
+(defun flycheck-reset-enabled-checker (checker)
+  "Reset the `:enabled' test of CHECKER.
+
+Forget that CHECKER has been enabled or automatically disabled
+from a previous `:enabled' test.  Once a checker has been enabled
+or automatically disabled, `flycheck-may-enable-checker' will
+always be constant (t or nil respectively).
+
+If you wish to test the `:enabled' predicate again, you must
+first reset its state using this function."
+  (when (memq checker flycheck--automatically-disabled-checkers)
+    (setq flycheck--automatically-disabled-checkers
+          (remq checker flycheck--automatically-disabled-checkers)))
+  (when (memq checker flycheck-enabled-checkers)
+    (setq flycheck-enabled-checkers
+          (remq checker flycheck-enabled-checkers))))
 
 (defun flycheck-may-use-checker (checker)
   "Whether a generic CHECKER may be used.
@@ -2114,7 +2151,7 @@ Return a list of `flycheck-verification-result' objects."
         (enabled (flycheck-checker-get checker 'enabled))
         (verify (flycheck-checker-get checker 'verify)))
     (when enabled
-      (let ((result (funcall enabled)))
+      (let ((result (flycheck-may-enable-checker checker)))
         (push (flycheck-verification-result-new
                :label "may enable"
                :message (if result "yes" "Automatically disabled!")
@@ -2783,12 +2820,12 @@ add CHECKER to `flycheck-disabled-checkers', and show a warning.
 Return t when CHECKER was disabled, or nil otherwise."
   (when (and flycheck-checker-error-threshold
              (> (length errors) flycheck-checker-error-threshold))
-    ;; Disable CHECKER for this buffer (`flycheck-disabled-checkers' is a local
-    ;; variable).
+    ;; Disable CHECKER for this buffer
+    ;; (`flycheck-automatically-disabled-checkers' is a local variable).
     (lwarn '(flycheck syntax-checker) :warning
            "Syntax checker %s reported too many errors (%s) and is disabled."
            checker (length errors))
-    (push checker flycheck-disabled-checkers)
+    (push checker flycheck--automatically-disabled-checkers)
     t))
 
 (defun flycheck-clear (&optional shall-interrupt)
